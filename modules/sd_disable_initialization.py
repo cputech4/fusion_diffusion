@@ -76,7 +76,7 @@ class DisableInitialization(ReplaceHelper):
         def transformers_utils_hub_get_file_from_cache(original, url, *args, **kwargs):
 
             # this file is always 404, prevent making request
-            if url == 'https://huggingface.co/openai/clip-vit-large-patch14/resolve/main/added_tokens.json' or url == 'openai/clip-vit-large-patch14' and args[0] == 'added_tokens.json':
+            if url == f'{shared.hf_endpoint}/openai/clip-vit-large-patch14/resolve/main/added_tokens.json' or url == 'openai/clip-vit-large-patch14' and args[0] == 'added_tokens.json':
                 return None
 
             try:
@@ -215,7 +215,7 @@ class LoadStateDictOnMeta(ReplaceHelper):
             would be on the meta device.
             """
 
-            if state_dict == sd:
+            if state_dict is sd:
                 state_dict = {k: v.to(device="meta", dtype=v.dtype) for k, v in state_dict.items()}
 
             original(module, state_dict, strict=strict)

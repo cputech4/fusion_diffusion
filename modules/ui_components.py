@@ -88,9 +88,10 @@ class DropdownEditable(FormComponent, gr.Dropdown):
 class InputAccordion(gr.Checkbox):
     """A gr.Accordion that can be used as an input - returns True if open, False if closed.
 
-    Actaully just a hidden checkbox, but creates an accordion that follows and is followed by the state of the checkbox.
+    Actually just a hidden checkbox, but creates an accordion that follows and is followed by the state of the checkbox.
     """
 
+    accordion_id_set = set()
     global_index = 0
 
     def __init__(self, value, **kwargs):
@@ -98,6 +99,18 @@ class InputAccordion(gr.Checkbox):
         if self.accordion_id is None:
             self.accordion_id = f"input-accordion-{InputAccordion.global_index}"
             InputAccordion.global_index += 1
+
+        if not InputAccordion.accordion_id_set:
+            from modules import script_callbacks
+            script_callbacks.on_script_unloaded(InputAccordion.reset)
+
+        if self.accordion_id in InputAccordion.accordion_id_set:
+            count = 1
+            while (unique_id := f'{self.accordion_id}-{count}') in InputAccordion.accordion_id_set:
+                count += 1
+            self.accordion_id = unique_id
+
+        InputAccordion.accordion_id_set.add(self.accordion_id)
 
         kwargs_checkbox = {
             **kwargs,
@@ -143,3 +156,7 @@ class InputAccordion(gr.Checkbox):
     def get_block_name(self):
         return "checkbox"
 
+    @classmethod
+    def reset(cls):
+        cls.global_index = 0
+        cls.accordion_id_set.clear()

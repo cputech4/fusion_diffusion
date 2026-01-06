@@ -11,14 +11,13 @@ import safetensors.torch
 
 import numpy as np
 from PIL import Image, PngImagePlugin
-from torch.utils.tensorboard import SummaryWriter
 
-from modules import shared, devices, sd_hijack, sd_models, images, sd_samplers, sd_hijack_checkpoint, errors, hashes
+from modules import shared, devices, sd_hijack, sd_models, images, sd_samplers, sd_hijack_checkpoint, errors, hashes, cache
 import modules.textual_inversion.dataset
 from modules.textual_inversion.learn_schedule import LearnRateScheduler
 
 from modules.textual_inversion.image_embedding import embedding_to_b64, embedding_from_b64, insert_image_data_embed, extract_image_data_embed, caption_image_overlay
-from modules.textual_inversion.logging import save_settings_to_file
+from modules.textual_inversion.saving_settings import save_settings_to_file
 
 
 TextualInversionTemplate = namedtuple("TextualInversionTemplate", ["name", "path"])
@@ -117,6 +116,7 @@ class EmbeddingDatabase:
         self.expected_shape = -1
         self.embedding_dirs = {}
         self.previously_displayed_embeddings = ()
+        self.image_embedding_cache = cache.cache('image-embedding')
 
     def add_embedding_dir(self, path):
         self.embedding_dirs[path] = DirWithTextualInversionEmbeddings(path)
@@ -151,8 +151,34 @@ class EmbeddingDatabase:
         return embedding
 
     def get_expected_shape(self):
+        devices.torch_npu_set_device()
         vec = shared.sd_model.cond_stage_model.encode_embedding_init_text(",", 1)
         return vec.shape[1]
+
+    def read_embedding_from_image(self, path, name):
+        try:
+            ondisk_mtime = os.path.getmtime(path)
+
+            if (cache_embedding := self.image_embedding_cache.get(path)) and ondisk_mtime == cache_embedding.get('mtime', 0):
+                # cache will only be used if the file has not been modified time matches
+                return cache_embedding.get('data', None), cache_embedding.get('name', None)
+
+            embed_image = Image.open(path)
+            if hasattr(embed_image, 'text') and 'sd-ti-embedding' in embed_image.text:
+                data = embedding_from_b64(embed_image.text['sd-ti-embedding'])
+                name = data.get('name', name)
+            elif data := extract_image_data_embed(embed_image):
+                name = data.get('name', name)
+
+            if data is None or shared.opts.textual_inversion_image_embedding_data_cache:
+                # data of image embeddings only will be cached if the option textual_inversion_image_embedding_data_cache is enabled
+                # results of images that are not embeddings will allways be cached to reduce unnecessary future disk reads
+                self.image_embedding_cache[path] = {'data': data, 'name': None if data is None else name, 'mtime': ondisk_mtime}
+
+            return data, name
+        except Exception:
+            errors.report(f"Error loading embedding {path}", exc_info=True)
+        return None, None
 
     def load_from_file(self, path, filename):
         name, ext = os.path.splitext(filename)
@@ -163,17 +189,10 @@ class EmbeddingDatabase:
             if second_ext.upper() == '.PREVIEW':
                 return
 
-            embed_image = Image.open(path)
-            if hasattr(embed_image, 'text') and 'sd-ti-embedding' in embed_image.text:
-                data = embedding_from_b64(embed_image.text['sd-ti-embedding'])
-                name = data.get('name', name)
-            else:
-                data = extract_image_data_embed(embed_image)
-                if data:
-                    name = data.get('name', name)
-                else:
-                    # if data is None, means this is not an embeding, just a preview image
-                    return
+            data, name = self.read_embedding_from_image(path, name)
+            if data is None:
+                return
+
         elif ext in ['.BIN', '.PT']:
             data = torch.load(path, map_location="cpu")
         elif ext in ['.SAFETENSORS']:
@@ -181,12 +200,15 @@ class EmbeddingDatabase:
         else:
             return
 
-        embedding = create_embedding_from_data(data, name, filename=filename, filepath=path)
+        if data is not None:
+            embedding = create_embedding_from_data(data, name, filename=filename, filepath=path)
 
-        if self.expected_shape == -1 or self.expected_shape == embedding.shape:
-            self.register_embedding(embedding, shared.sd_model)
+            if self.expected_shape == -1 or self.expected_shape == embedding.shape:
+                self.register_embedding(embedding, shared.sd_model)
+            else:
+                self.skipped_embeddings[name] = embedding
         else:
-            self.skipped_embeddings[name] = embedding
+            print(f"Unable to load Textual inversion embedding due to data issue: '{name}'.")
 
     def load_from_dir(self, embdir):
         if not os.path.isdir(embdir.path):
@@ -344,6 +366,7 @@ def write_loss(log_directory, filename, step, epoch_len, values):
         })
 
 def tensorboard_setup(log_directory):
+    from torch.utils.tensorboard import SummaryWriter
     os.makedirs(os.path.join(log_directory, "tensorboard"), exist_ok=True)
     return SummaryWriter(
             log_dir=os.path.join(log_directory, "tensorboard"),
@@ -448,8 +471,12 @@ def train_embedding(id_task, embedding_name, learn_rate, batch_size, gradient_st
     shared.state.textinfo = f"Preparing dataset from {html.escape(data_root)}..."
     old_parallel_processing_allowed = shared.parallel_processing_allowed
 
+    tensorboard_writer = None
     if shared.opts.training_enable_tensorboard:
-        tensorboard_writer = tensorboard_setup(log_directory)
+        try:
+            tensorboard_writer = tensorboard_setup(log_directory)
+        except ImportError:
+            errors.report("Error initializing tensorboard", exc_info=True)
 
     pin_memory = shared.opts.pin_memory
 
@@ -622,7 +649,7 @@ def train_embedding(id_task, embedding_name, learn_rate, batch_size, gradient_st
                         last_saved_image, last_text_info = images.save_image(image, images_dir, "", p.seed, p.prompt, shared.opts.samples_format, processed.infotexts[0], p=p, forced_filename=forced_filename, save_to_dirs=False)
                         last_saved_image += f", prompt: {preview_text}"
 
-                        if shared.opts.training_enable_tensorboard and shared.opts.training_tensorboard_save_images:
+                        if tensorboard_writer and shared.opts.training_tensorboard_save_images:
                             tensorboard_add_image(tensorboard_writer, f"Validation at epoch {epoch_num}", image, embedding.step)
 
                     if save_image_with_stored_embedding and os.path.exists(last_saved_file) and embedding_yet_to_be_embedded:
