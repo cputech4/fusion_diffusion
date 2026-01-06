@@ -2,13 +2,13 @@ GitPython
 Pillow
 accelerate
 
-basicsr
 blendmodes
 clean-fid
+diskcache
 einops
+facexlib
 fastapi>=0.90.1
-gfpgan
-gradio==3.41.2
+gradio==4.38.1
 inflection
 jsonmerge
 kornia
@@ -18,19 +18,17 @@ omegaconf
 open-clip-torch
 
 piexif
+protobuf==3.20.0
 psutil
 pytorch_lightning
-realesrgan
 requests
 resize-right
 
 safetensors
 scikit-image>=0.19
-timm
 tomesd
 torch
 torchdiffeq
 torchsde
 transformers==4.30.2
-
-git+https://github.com/openai/consistencydecoder.git
+pillow-avif-plugin==1.4.3
